@@ -53,7 +53,6 @@ const SHOW_TIMING_MATH = false;
 const conversationStates = {};
 
 // Our decision tree questions
-// Some are universal, some are specialized if user indicates "Car accident".
 const mainFlow = [
   {
     name: 'policyId',
@@ -63,8 +62,7 @@ const mainFlow = [
     name: 'claimType',
     question: 'Great, now please describe the nature of your claim, for example: Car accident, theft, or vandalism?'
   },
-  // This is a pivot question. If user says "car accident" we go into carAccident subFlow.
-  // If user says "theft", we go into theft subFlow. Otherwise, we can do a default subFlow.
+  // This is a pivot question. Based on the answer to "claimType", we decide on a subFlow.
 ];
 
 const carAccidentFlow = [
@@ -121,8 +119,8 @@ const vandalismFlow = [
 ];
 
 /**
- * Called after user finishes the entire main flow + sub flow (or if user says "done").
- * This is where you can finalize or push data to Google Sheets, etc.
+ * Called after the user finishes the entire main flow + sub flow (or if the user says "done").
+ * Here you can finalize or push data to external services.
  */
 function finalizeClaim(connection, openAiWs, streamSid) {
   const { conversationData } = conversationStates[streamSid] || { conversationData: {} };
@@ -140,7 +138,6 @@ function finalizeClaim(connection, openAiWs, streamSid) {
 
 /**
  * Decides which question to ask next based on the conversation state.
- * If we've exhausted the main flow, we proceed to sub flow if appropriate.
  */
 function askNextQuestion(connection, openAiWs, streamSid) {
   const state = conversationStates[streamSid];
@@ -148,34 +145,32 @@ function askNextQuestion(connection, openAiWs, streamSid) {
   
   const { decisionTreeStep, conversationData, subFlow } = state;
   
-  // If we haven't finished the main flow, proceed
+  // If we haven't finished the main flow, proceed with the next main question.
   if (decisionTreeStep < mainFlow.length) {
     const nextQuestion = mainFlow[decisionTreeStep].question;
     sendAssistantMessage(openAiWs, nextQuestion);
     return;
   }
   
-  // If we finished main flow, we check subFlow
+  // If the main flow is complete, check if a subFlow has been defined.
   if (!subFlow) {
-    // The user provided some claimType we didn't define, or didn't match "car accident"/"theft"/"vandalism"
-    // We can ask a fallback question or finalize.
     sendAssistantMessage(openAiWs, 'Thanks for that. We currently have minimal details on your claim. Is there anything else you would like to add? Otherwise, say "done".');
     return;
   }
   
-  // We are in a subFlow: carAccidentFlow, theftFlow, or vandalismFlow.
+  // We are in a subFlow (carAccidentFlow, theftFlow, or vandalismFlow).
   const subFlowQuestions = subFlow.flowArray;
   if (state.subFlowStep < subFlowQuestions.length) {
     const nextQuestion = subFlowQuestions[state.subFlowStep].question;
     sendAssistantMessage(openAiWs, nextQuestion);
   } else {
-    // subFlow done => finalize
+    // SubFlow is done; finalize the claim.
     finalizeClaim(connection, openAiWs, streamSid);
   }
 }
 
 /**
- * Processes recognized user text to fill the decision tree
+ * Processes recognized user text to fill in the decision tree.
  */
 function handleUserResponse(connection, openAiWs, streamSid, userText) {
   const state = conversationStates[streamSid];
@@ -183,16 +178,14 @@ function handleUserResponse(connection, openAiWs, streamSid, userText) {
   
   let { decisionTreeStep, subFlow, subFlowStep, conversationData } = state;
   
-  // If we are still in main flow
+  // Still within the main flow.
   if (decisionTreeStep < mainFlow.length) {
     const questionObj = mainFlow[decisionTreeStep];
     conversationData[questionObj.name] = userText;
     
-    // Check if the question we just answered is the "claimType"
+    // When processing the "claimType" answer, decide on the appropriate subFlow.
     if (questionObj.name === 'claimType') {
-      // Lower-case the userText to decide the subFlow
       const claimType = userText.toLowerCase();
-      
       if (claimType.includes('car')) {
         subFlow = {
           name: 'carAccidentFlow',
@@ -209,31 +202,28 @@ function handleUserResponse(connection, openAiWs, streamSid, userText) {
           flowArray: vandalismFlow
         };
       } else {
-        // no recognized subFlow => we will just finalize after main flow
         subFlow = null;
       }
       state.subFlow = subFlow;
     }
     
-    // Move to next question in main flow
+    // Move to the next question in the main flow.
     state.decisionTreeStep += 1;
     askNextQuestion(connection, openAiWs, streamSid);
     return;
   }
   
-  // If main flow is done, we might be in subFlow
+  // Main flow complete but no subFlow defined.
   if (!subFlow) {
-    // If user says "done", finalize
     if (userText.toLowerCase().includes('done')) {
       finalizeClaim(connection, openAiWs, streamSid);
     } else {
-      // Otherwise, just confirm or ask if there's anything else
       sendAssistantMessage(openAiWs, 'Noted. Anything else you want to add? Or say "done" to finalize.');
     }
     return;
   }
   
-  // Otherwise we are in a recognized subFlow
+  // We are in a recognized subFlow.
   const subFlowQuestions = subFlow.flowArray;
   if (subFlowStep < subFlowQuestions.length) {
     const questionObj = subFlowQuestions[subFlowStep];
@@ -242,7 +232,6 @@ function handleUserResponse(connection, openAiWs, streamSid, userText) {
     
     askNextQuestion(connection, openAiWs, streamSid);
   } else {
-    // If user still says something after subFlow complete, we finalize or ask if done
     if (userText.toLowerCase().includes('done')) {
       finalizeClaim(connection, openAiWs, streamSid);
     } else {
@@ -252,7 +241,7 @@ function handleUserResponse(connection, openAiWs, streamSid, userText) {
 }
 
 /**
- * Sends a message from the "assistant" to the user via the Realtime API
+ * Sends a message from the "assistant" to the user via the OpenAI Realtime API.
  */
 function sendAssistantMessage(openAiWs, text) {
   const conversationItem = {
@@ -270,11 +259,20 @@ function sendAssistantMessage(openAiWs, text) {
   };
   openAiWs.send(JSON.stringify(conversationItem));
   
-  // Then, we must trigger the response creation so it actually gets spoken.
+  // Trigger the response creation so it gets spoken.
   openAiWs.send(JSON.stringify({ type: 'response.create' }));
 }
 
-//
+/**
+ * Sends an initial greeting. Now accepts the openAiWs instance as an argument.
+ */
+function sendGreeting(openAiWs) {
+  const greeting = `Hello there! I am your AI voice assistant for auto insurance claims. 
+I’ll collect some details about your claim. Let’s get started!`;
+
+  sendAssistantMessage(openAiWs, greeting);
+}
+
 //
 // =============== SERVER SETUP ===============
 //
@@ -282,11 +280,11 @@ fastify.get('/', async (request, reply) => {
   reply.send({ message: 'Twilio Media Stream Server is running!' });
 });
 
-// Route for Twilio to handle incoming calls
+// Route for Twilio to handle incoming calls.
 fastify.all('/incoming-call', async (request, reply) => {
   const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
     <Response>
-      <Say>Please wait while we connect your call to the A. I. voice assistant, powered by Twilio and the Open-A.I. Realtime API</Say>
+      <Say>Please wait while we connect your call</Say>
       <Pause length="1"/>
       <Say>O.K. you can start talking!</Say>
       <Connect>
@@ -297,19 +295,19 @@ fastify.all('/incoming-call', async (request, reply) => {
   reply.type('text/xml').send(twimlResponse);
 });
 
-// WebSocket route for media-stream
+// WebSocket route for media-stream.
 fastify.register(async (fastify) => {
   fastify.get('/media-stream', { websocket: true }, (connection, req) => {
     console.log('Client connected');
 
-    // Connection-specific state
+    // Connection-specific state.
     let streamSid = null;
     let latestMediaTimestamp = 0;
     let lastAssistantItem = null;
     let markQueue = [];
     let responseStartTimestampTwilio = null;
 
-    // Create a WebSocket to connect to OpenAI Realtime
+    // Create a WebSocket to connect to OpenAI Realtime.
     const openAiWs = new WebSocket('wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17', {
       headers: {
         Authorization: `Bearer ${OPENAI_API_KEY}`,
@@ -317,7 +315,7 @@ fastify.register(async (fastify) => {
       }
     });
 
-    // Initialize session with the Realtime API
+    // Initialize session with the Realtime API.
     const initializeSession = () => {
       const sessionUpdate = {
         type: 'session.update',
@@ -336,14 +334,6 @@ fastify.register(async (fastify) => {
       openAiWs.send(JSON.stringify(sessionUpdate));
     };
 
-    // Optionally have the AI speak first with a greeting
-    const sendGreeting = () => {
-      const greeting = `Hello there! I am your AI voice assistant for auto insurance claims. 
-                        I’ll collect some details about your claim. Let’s get started!`;
-
-      sendAssistantMessage(openAiWs, greeting);
-    };
-
     //
     // ============= OPENAI WS EVENT HANDLERS =============
     //
@@ -351,8 +341,7 @@ fastify.register(async (fastify) => {
       console.log('Connected to the OpenAI Realtime API');
       setTimeout(() => {
         initializeSession();
-        // Let’s greet the user right away:
-        setTimeout(sendGreeting, 500);
+        // Removed sendGreeting from here.
       }, 100);
     });
 
@@ -364,7 +353,7 @@ fastify.register(async (fastify) => {
           console.log(`Received event: ${response.type}`, response);
         }
 
-        // --- Audio Deltas: forward to Twilio
+        // Forward audio deltas to Twilio.
         if (response.type === 'response.audio.delta' && response.delta) {
           const audioDelta = {
             event: 'media',
@@ -373,7 +362,7 @@ fastify.register(async (fastify) => {
           };
           connection.send(JSON.stringify(audioDelta));
 
-          // The first delta from a new response sets the start timestamp
+          // Set the start timestamp for the new response.
           if (!responseStartTimestampTwilio) {
             responseStartTimestampTwilio = latestMediaTimestamp;
             if (SHOW_TIMING_MATH) {
@@ -385,28 +374,24 @@ fastify.register(async (fastify) => {
             lastAssistantItem = response.item_id;
           }
           
-          // We send a small 'mark' to keep Twilio from speaking over itself
+          // Send a small 'mark' to keep Twilio from speaking over itself.
           sendMark(connection, streamSid);
         }
 
-        // --- If user speech starts
+        // Handle user speech starting.
         if (response.type === 'input_audio_buffer.speech_started') {
           handleSpeechStartedEvent();
         }
 
-        // --- If the user says something recognized by the Realtime API
-        // The recognized user text typically arrives in:
-        //    type = 'conversation.item.create'
-        //    item.role = 'user'
+        // Process recognized user text.
         if (response.type === 'conversation.item.create' && response.item?.role === 'user') {
           const userText = response.item?.content?.[0]?.text;
-          if (!userText) return; // If there's no recognized text, skip
+          if (!userText) return;
           console.log(`User said: ${userText}`);
 
-          // Pass user text to decision tree logic
+          // Pass the user text to the decision tree logic.
           handleUserResponse(connection, openAiWs, streamSid, userText);
         }
-
       } catch (error) {
         console.error('Error processing OpenAI message:', error, 'Raw message:', data);
       }
@@ -428,6 +413,27 @@ fastify.register(async (fastify) => {
         const data = JSON.parse(message);
 
         switch (data.event) {
+          case 'start':
+            streamSid = data.start.streamSid;
+            console.log('Incoming stream has started', streamSid);
+
+            // Initialize conversation state for this new call.
+            conversationStates[streamSid] = {
+              decisionTreeStep: 0,
+              subFlow: null,
+              subFlowStep: 0,
+              conversationData: {}
+            };
+
+            responseStartTimestampTwilio = null;
+            latestMediaTimestamp = 0;
+
+            // Now that we have a valid streamSid and conversation state, send the greeting.
+            if (openAiWs.readyState === WebSocket.OPEN) {
+              sendGreeting(openAiWs);
+            }
+            break;
+
           case 'media':
             latestMediaTimestamp = data.media.timestamp;
             if (SHOW_TIMING_MATH) {
@@ -441,22 +447,6 @@ fastify.register(async (fastify) => {
               };
               openAiWs.send(JSON.stringify(audioAppend));
             }
-            break;
-
-          case 'start':
-            streamSid = data.start.streamSid;
-            console.log('Incoming stream has started', streamSid);
-
-            // Initialize conversation state for this new call
-            conversationStates[streamSid] = {
-              decisionTreeStep: 0,
-              subFlow: null,
-              subFlowStep: 0,
-              conversationData: {}
-            };
-
-            responseStartTimestampTwilio = null;
-            latestMediaTimestamp = 0;
             break;
 
           case 'mark':
@@ -478,7 +468,7 @@ fastify.register(async (fastify) => {
       if (openAiWs.readyState === WebSocket.OPEN) {
         openAiWs.close();
       }
-      // Cleanup conversation state
+      // Cleanup conversation state.
       if (streamSid && conversationStates[streamSid]) {
         delete conversationStates[streamSid];
       }
@@ -489,7 +479,6 @@ fastify.register(async (fastify) => {
     // ============= HELPER FUNCTIONS =============
     //
     function handleSpeechStartedEvent() {
-      // If Twilio begins capturing new speech while we were still speaking:
       if (markQueue.length > 0 && responseStartTimestampTwilio != null) {
         const elapsedTime = latestMediaTimestamp - responseStartTimestampTwilio;
         if (SHOW_TIMING_MATH) {
@@ -509,13 +498,13 @@ fastify.register(async (fastify) => {
           openAiWs.send(JSON.stringify(truncateEvent));
         }
 
-        // Send 'clear' to Twilio
+        // Send 'clear' to Twilio.
         connection.send(JSON.stringify({
           event: 'clear',
           streamSid
         }));
 
-        // Reset
+        // Reset.
         markQueue = [];
         lastAssistantItem = null;
         responseStartTimestampTwilio = null;
@@ -543,26 +532,3 @@ fastify.listen({ port: PORT }, (err) => {
   }
   console.log(`Server is listening on port ${PORT}`);
 });
-
-/**
- * We replicate the sendAssistantMessage function here again if you want it
- * as a separate utility, but it's above for clarity.
- * 
- * function sendAssistantMessage(openAiWs, text) {
- *   const conversationItem = {
- *     type: 'conversation.item.create',
- *     item: {
- *       type: 'message',
- *       role: 'assistant',
- *       content: [
- *         {
- *           type: 'input_text',
- *           text
- *         }
- *       ]
- *     }
- *   };
- *   openAiWs.send(JSON.stringify(conversationItem));
- *   openAiWs.send(JSON.stringify({ type: 'response.create' }));
- * }
- */
