@@ -98,23 +98,23 @@ const vandalismFlow = [
  * Helper: Send an Assistant Message to OpenAI Realtime
  *******************************************************/
 function sendAssistantMessage(openAiWs, text) {
-  // const conversationItem = {
-  //   type: 'conversation.item.create',
-  //   item: {
-  //     type: 'message',
-  //     role: 'assistant',
-  //     content: [
-  //       {
-  //         type: 'input_text',
-  //         text
-  //       }
-  //     ]
-  //   }
-  // };
-  // openAiWs.send(JSON.stringify(conversationItem));
+  const conversationItem = {
+    type: 'conversation.item.create',
+    item: {
+      type: 'message',
+      role: 'assistant',
+      content: [
+        {
+          type: 'input_text',
+          text
+        }
+      ]
+    }
+  };
+  openAiWs.send(JSON.stringify(conversationItem));
 
-  // // This tells OpenAI to generate an audio response for the newly queued assistant message.
-  // openAiWs.send(JSON.stringify({ type: 'response.create' }));
+  // This tells OpenAI to generate an audio response for the newly queued assistant message.
+  openAiWs.send(JSON.stringify({ type: 'response.create' }));
   return;
 }
 

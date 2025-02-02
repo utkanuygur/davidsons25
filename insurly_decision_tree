@@ -1,0 +1,53 @@
+// Insurly Decision Tree
+digraph {
+	A [label=Start shape=circle]
+	B [label="Ask: \"Can you please tell me your Policy ID?\"" shape=box]
+	C [label="Ask: \"What is the nature of your claim?
+(Car accident, theft, vandalism)\"" shape=box]
+	D [label="Car Accident Flow" shape=box]
+	E [label="Theft Flow" shape=box]
+	F [label="Vandalism Flow" shape=box]
+	G [label="No Sub-flow
+Prompt: \"Anything else? (or say 'done')\"" shape=box]
+	D1 [label="Ask: \"Was there any alcohol involved?\"" shape=box]
+	D2 [label="Ask: \"How severe was the accident?\"" shape=box]
+	D3 [label="Ask: \"Were there any injuries?\"" shape=box]
+	D4 [label="Car Accident Info Complete
+\"Anything else? (or say 'done')\"" shape=box]
+	E1 [label="Ask: \"Where did the theft occur?\"" shape=box]
+	E2 [label="Ask: \"What was stolen?\"" shape=box]
+	E3 [label="Ask: \"Have you filed a police report?\"" shape=box]
+	E4 [label="Theft Info Complete
+\"Anything else? (or say 'done')\"" shape=box]
+	F1 [label="Ask: \"Describe the vandalism?\"" shape=box]
+	F2 [label="Ask: \"Did you report it to authorities?\"" shape=box]
+	F3 [label="Vandalism Info Complete
+\"Anything else? (or say 'done')\"" shape=box]
+	H [label="Wait for user response
+or \"done\"" shape=box]
+	I [label="Finalize Claim" shape=doublecircle]
+	J [label="End Conversation" shape=circle]
+	A -> B
+	B -> C
+	C -> D [label="Includes \"car\""]
+	C -> E [label="Includes \"theft\""]
+	C -> F [label="Includes \"vandalism\""]
+	C -> G [label="Unrecognized Type"]
+	D -> D1
+	D1 -> D2
+	D2 -> D3
+	D3 -> D4
+	E -> E1
+	E1 -> E2
+	E2 -> E3
+	E3 -> E4
+	F -> F1
+	F1 -> F2
+	F2 -> F3
+	G -> H
+	D4 -> I
+	E4 -> I
+	F3 -> I
+	H -> I
+	I -> J
+}

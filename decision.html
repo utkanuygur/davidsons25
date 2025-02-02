@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>Decision Tree Diagram</title>
+
+  <!-- Mermaid (ESM) -->
+  <script type="module">
+    import mermaid from "https://unpkg.com/mermaid@10/dist/mermaid.esm.min.mjs";
+    mermaid.initialize({ startOnLoad: true });
+  </script>
+
+  <!-- For older browsers or environments without module support, you can use:
+       <script src="https://unpkg.com/mermaid@10/dist/mermaid.min.js"></script>
+       <script>
+         mermaid.initialize({ startOnLoad: true });
+       </script>
+  -->
+</head>
+
+<body>
+<!-- Wrap your Mermaid definition in a <div class="mermaid"> -->
+<div class="mermaid">
+flowchart TD
+    A((Start)) --> B[Ask policyId<br/><small>"First, can you please tell me your policy ID?"</small>]
+    B --> C[Ask claimType<br/><small>"Now, is this a Car accident, Theft, or Vandalism claim?"</small>]
+
+    C --> D{Claim type?}
+    
+    D -- "Car Accident" --> CA1[alcoholInvolvement<br/><small>"Was alcohol involved?"</small>]
+    CA1 --> CA2[accidentSeverity<br/><small>"How severe was it?"</small>]
+    CA2 --> CA3[accidentInjuries<br/><small>"Were there injuries?"</small>]
+    CA3 --> CA4[accidentComplete<br/><small>"All accident info gathered."</small>]
+    CA4 --> Z[Finalize or done]
+    
+    D -- "Theft" --> T1[theftLocation<br/><small>"Where did it occur?"</small>]
+    T1 --> T2[theftItemsStolen<br/><small>"What was stolen?"</small>]
+    T2 --> T3[theftPoliceReport<br/><small>"Police report filed?"</small>]
+    T3 --> T4[theftComplete<br/><small>"All theft info gathered."</small>]
+    T4 --> Z[Finalize or done]
+    
+    D -- "Vandalism" --> V1[vandalismDetails<br/><small>"Describe the vandalism."</small>]
+    V1 --> V2[vandalismPoliceReport<br/><small>"Reported to authorities?"</small>]
+    V2 --> V3[vandalismComplete<br/><small>"All vandalism info gathered."</small>]
+    V3 --> Z[Finalize or done]
+
+    % If claimType is unrecognized:
+    D -- "Unrecognized" --> U1[No subflow<br/><small>"User clarifies or says 'done'.</small>]
+    U1 --> Z[Finalize or done]
+
+    Z((Done / Claim Finalized))
+</div>
+</body>
+</html>
