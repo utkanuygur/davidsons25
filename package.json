@@ -1,32 +1,27 @@
 {
     "name": "speech-assistant-openai-realtime-api-node",
     "version": "1.0.1",
-    "description": "🚀 A cutting-edge Node.js speech assistant that leverages OpenAI's realtime API (GPT-4o Mini) and Whisper for dynamic auto insurance claim processing! 🤖📞",
+    "description": "",
     "main": "index.js",
     "scripts": {
-      "start": "node index.js"
+        "start": "node index.js",
+        "test": "jest"
     },
-    "keywords": [
-      "openai",
-      "realtime",
-      "speech-to-text",
-      "whisper",
-      "auto-insurance",
-      "node",
-      "fastify",
-      "websocket"
-    ],
+    "keywords": [],
     "author": "",
     "license": "ISC",
     "type": "module",
     "dependencies": {
-      "@fastify/formbody": "^8.0.0",
-      "@fastify/websocket": "^11.0.0",
-      "dotenv": "^16.4.5",
-      "fastify": "^5.0.0",
-      "ws": "^8.18.0",
-      "openai": "^4.0.0",
-      "ffmpeg-static": "^5.1.0"
+        "@fastify/formbody": "^8.0.0",
+        "@fastify/websocket": "^11.0.0",
+        "aws-sdk": "latest",
+        "dotenv": "^16.4.5",
+        "fastify": "^5.0.0",
+        "ffmpeg-static": "latest",
+        "openai": "latest"
+    },
+    "devDependencies": {
+        "jest": "^29.7.0",
+        "ws": "^8.18.0"
     }
-  }
-  
+}

@@ -1,46 +1,49 @@
+/*****************************************************
+ * server.js
+ * 
+ * A streamlined Fastify-based server integrating
+ * Twilio Media Streams with OpenAI Realtime.
+ *****************************************************/
+
 import Fastify from 'fastify';
 import WebSocket from 'ws';
 import dotenv from 'dotenv';
 import fastifyFormBody from '@fastify/formbody';
 import fastifyWs from '@fastify/websocket';
-import fs from 'fs';
-import path from 'path';
-import { spawn } from 'child_process';
-import ffmpegPath from 'ffmpeg-static';
-import { Configuration, OpenAIApi } from 'openai';
 
+// Load environment variables, including OPENAI_API_KEY
 dotenv.config();
-
 const { OPENAI_API_KEY } = process.env;
-
 if (!OPENAI_API_KEY) {
   console.error('Missing OpenAI API key. Please set it in the .env file.');
   process.exit(1);
 }
 
-// === OpenAI Setup (for Whisper and GPT Realtime) ===
-const openAiConfig = new Configuration({ apiKey: OPENAI_API_KEY });
-const openai = new OpenAIApi(openAiConfig);
-
 const fastify = Fastify();
 fastify.register(fastifyFormBody);
 fastify.register(fastifyWs);
 
-//
-// === CONFIGURATION CONSTANTS ===
-//
+const PORT = 5050;
+const VOICE = 'alloy';
+
+/** 
+ * System instructions for the OpenAI Realtime model.
+ * These guide the conversation approach and style.
+ */
 const SYSTEM_MESSAGE = `
 You are a helpful and friendly AI assistant specialized in gathering information for auto insurance claims. 
 You follow a decision tree approach to collect essential claim information. 
-You love to provide subtle dad jokes, owl jokes, or an occasional rickroll reference - all in a nice, positive style. 
+For recognized user input, you should store or parse the user’s answers in a stateful conversation. 
 Always confirm the user’s statements politely and then ask the next required question.
 `;
-const VOICE = 'alloy';
-const PORT = 5050; 
+
+// Store each call’s conversation state by streamSid.
+const conversationStates = {};
+
+// For debugging or logging what kind of events to display
 const LOG_EVENT_TYPES = [
   'error',
   'response.content.done',
-  'rate_limits.updated',
   'response.done',
   'input_audio_buffer.committed',
   'input_audio_buffer.speech_stopped',
@@ -48,104 +51,138 @@ const LOG_EVENT_TYPES = [
   'session.created'
 ];
 
+// Toggle for debugging time-based truncation logic
 const SHOW_TIMING_MATH = false;
 
-// A simple in-memory store for conversation data.
-const conversationStates = {};
-
-// Decision tree questions
+/******************************************************
+ * Decision Tree Flows
+ * 
+ * We define a main flow that asks for:
+ * 1) policyId
+ * 2) claimType
+ * 
+ * Then we branch to sub-flows:
+ * - car accident
+ * - theft
+ * - vandalism
+ *****************************************************/
 const mainFlow = [
-  { name: 'policyId', question: 'First, can you please tell me your policy ID?' },
-  { name: 'claimType', question: 'Great, now please describe the nature of your claim, for example: Car accident, theft, or vandalism?' },
+  { name: 'policyId',   question: 'First, can you please tell me your policy ID?' },
+  { name: 'claimType',  question: 'Great, now please describe the nature of your claim: Car accident, theft, or vandalism?' }
 ];
 
-// Subflows
 const carAccidentFlow = [
-  { name: 'alcoholInvolvement', question: 'Was there any alcohol involved from either side? Yes or No?' },
-  { name: 'accidentSeverity', question: 'How severe was the accident? (e.g., minor fender-bender, moderate, total loss?)' },
-  { name: 'accidentInjuries', question: 'Were there any injuries? Please describe briefly.' },
-  { name: 'accidentComplete', question: 'Thank you. Anything else to add regarding this accident?' }
+  { name: 'alcoholInvolvement', question: 'Was there any alcohol involved from either side? Please say "yes" or "no" or any details.' },
+  { name: 'accidentSeverity',   question: 'How severe was the accident? (For example, minor fender-bender, moderate damage, or total loss?)' },
+  { name: 'accidentInjuries',   question: 'Were there any injuries? If so, please describe them briefly.' },
+  { name: 'accidentComplete',   question: 'Thank you. I believe I have all details for a car accident. Anything else you would like to add?' }
 ];
 
 const theftFlow = [
-  { name: 'theftLocation', question: 'Where did the theft occur? (Example: parking lot, street, at home, etc.)' },
-  { name: 'theftItemsStolen', question: 'What items or parts were stolen from the vehicle?' },
-  { name: 'theftPoliceReport', question: 'Have you filed a police report? If yes, do you have a report number?' },
-  { name: 'theftComplete', question: 'Alright, thanks. Anything else about this theft incident?' }
+  { name: 'theftLocation',      question: 'Where did the theft occur? (public parking lot, street, home, etc.)' },
+  { name: 'theftItemsStolen',   question: 'What items or parts were stolen from the vehicle?' },
+  { name: 'theftPoliceReport',  question: 'Have you filed a police report? If yes, do you have a report number?' },
+  { name: 'theftComplete',      question: 'Alright, thanks for that. Anything else you wish to add about this theft incident?' }
 ];
 
 const vandalismFlow = [
-  { name: 'vandalismDetails', question: 'Can you describe the vandalism? e.g. broken windows, spray paint, etc.?' },
-  { name: 'vandalismPoliceReport', question: 'Did you report the vandalism to authorities? If so, reference?' },
-  { name: 'vandalismComplete', question: 'Understood. Anything else regarding the vandalism incident?' }
+  { name: 'vandalismDetails',       question: 'Can you describe the vandalism? (e.g., broken windows, spray paint, etc.)' },
+  { name: 'vandalismPoliceReport',  question: 'Did you report this vandalism to the authorities? If so, please provide any reference.' },
+  { name: 'vandalismComplete',      question: 'Understood. Anything else to add regarding this vandalism incident?' }
 ];
 
+
+/*******************************************************
+ * Helper: Send an Assistant Message to OpenAI Realtime
+ *******************************************************/
+function sendAssistantMessage(openAiWs, text) {
+  const conversationItem = {
+    type: 'conversation.item.create',
+    item: {
+      type: 'message',
+      role: 'assistant',
+      content: [
+        {
+          type: 'input_text',
+          text
+        }
+      ]
+    }
+  };
+  openAiWs.send(JSON.stringify(conversationItem));
+
+  // This tells OpenAI to generate an audio response for the newly queued assistant message.
+  openAiWs.send(JSON.stringify({ type: 'response.create' }));
+}
+
+
+/*******************************************************
+ * Step Functions: Decision Tree and Claim Summary
+ *******************************************************/
+
 /**
- * Finalizes the claim after the user finishes all required questions.
+ * finalizeClaim: Called when all claim info is collected or user says "done".
  */
 function finalizeClaim(connection, openAiWs, streamSid) {
   const { conversationData } = conversationStates[streamSid] || { conversationData: {} };
   
   let summary = `Here is the summary of your claim:\n`;
-  Object.keys(conversationData).forEach(key => {
+  for (const key of Object.keys(conversationData)) {
     summary += `- ${key}: ${conversationData[key]}\n`;
-  });
-  summary += 'Thank you for all the information! We will now store these details. Have a wonderful day!';
-
-  logToTranscriptFile(`\n-- AGENT --\n${summary}\n`);
+  }
+  summary += 'Thank you for providing all the information! We will now proceed to store these details. Have a wonderful day!';
+  
   sendAssistantMessage(openAiWs, summary);
 }
 
 /**
- * Picks the next question based on the conversation state.
+ * askNextQuestion: Presents the next question from mainFlow or subFlow
  */
 function askNextQuestion(connection, openAiWs, streamSid) {
   const state = conversationStates[streamSid];
   if (!state) return;
 
-  const { decisionTreeStep, subFlowStep, subFlow } = state;
-  
-  // Still in main flow
+  const { decisionTreeStep, conversationData, subFlow } = state;
+
+  // If we’re still within mainFlow
   if (decisionTreeStep < mainFlow.length) {
     const nextQuestion = mainFlow[decisionTreeStep].question;
-    logToTranscriptFile(`\n-- AGENT --\n${nextQuestion}\n`);
     sendAssistantMessage(openAiWs, nextQuestion);
     return;
   }
-  
-  // Main flow done; check subFlow
+
+  // If claimType wasn't recognized => no subFlow
   if (!subFlow) {
-    const fallback = 'Thanks for that. We have minimal details on your claim. Anything else? Or say "done".';
-    logToTranscriptFile(`\n-- AGENT --\n${fallback}\n`);
-    sendAssistantMessage(openAiWs, fallback);
+    sendAssistantMessage(openAiWs, 'Thanks for that. We currently have minimal details on your claim. Is there anything else you would like to add? Otherwise, say "done".');
     return;
   }
-  
+
+  // Otherwise, continue with the subFlow
   const subFlowQuestions = subFlow.flowArray;
-  if (subFlowStep < subFlowQuestions.length) {
-    const nextQuestion = subFlowQuestions[subFlowStep].question;
-    logToTranscriptFile(`\n-- AGENT --\n${nextQuestion}\n`);
+  if (state.subFlowStep < subFlowQuestions.length) {
+    const nextQuestion = subFlowQuestions[state.subFlowStep].question;
     sendAssistantMessage(openAiWs, nextQuestion);
   } else {
+    // Done with subFlow
     finalizeClaim(connection, openAiWs, streamSid);
   }
 }
 
 /**
- * Processes the recognized user text from Whisper to fill the decision tree.
+ * handleUserResponse: Called whenever user text arrives from the AI transcript
  */
 function handleUserResponse(connection, openAiWs, streamSid, userText) {
   const state = conversationStates[streamSid];
   if (!state) return;
-  
+
   let { decisionTreeStep, subFlow, subFlowStep, conversationData } = state;
-  
-  // If in main flow
+
+  // If still within mainFlow
   if (decisionTreeStep < mainFlow.length) {
     const questionObj = mainFlow[decisionTreeStep];
     conversationData[questionObj.name] = userText;
-    
-    // On claimType, pick subFlow
+
+    // If we just captured the claimType, we decide which subFlow to set
     if (questionObj.name === 'claimType') {
       const claimType = userText.toLowerCase();
       if (claimType.includes('car')) {
@@ -155,30 +192,27 @@ function handleUserResponse(connection, openAiWs, streamSid, userText) {
       } else if (claimType.includes('vandalism')) {
         subFlow = { name: 'vandalismFlow', flowArray: vandalismFlow };
       } else {
-        subFlow = null;
+        subFlow = null; // unrecognized claim type
       }
       state.subFlow = subFlow;
     }
-    
-    // Move to next question in the main flow
+
     state.decisionTreeStep += 1;
     askNextQuestion(connection, openAiWs, streamSid);
     return;
   }
-  
-  // Main flow is done but no subFlow
+
+  // If mainFlow is done, but subFlow is null (unrecognized or user didn't specify)
   if (!subFlow) {
     if (userText.toLowerCase().includes('done')) {
       finalizeClaim(connection, openAiWs, streamSid);
     } else {
-      const msg = 'Noted. Anything else you want to add? Or say "done" to finalize.';
-      logToTranscriptFile(`\n-- AGENT --\n${msg}\n`);
-      sendAssistantMessage(openAiWs, msg);
+      sendAssistantMessage(openAiWs, 'Noted. Anything else you want to add? Or say "done" to finalize.');
     }
     return;
   }
-  
-  // We are in a subFlow
+
+  // Within subFlow
   const subFlowQuestions = subFlow.flowArray;
   if (subFlowStep < subFlowQuestions.length) {
     const questionObj = subFlowQuestions[subFlowStep];
@@ -186,71 +220,29 @@ function handleUserResponse(connection, openAiWs, streamSid, userText) {
     state.subFlowStep += 1;
     askNextQuestion(connection, openAiWs, streamSid);
   } else {
-    // Possibly user is still talking after subFlow done
+    // SubFlow done, wait for user to say “done”
     if (userText.toLowerCase().includes('done')) {
       finalizeClaim(connection, openAiWs, streamSid);
     } else {
-      const doneMsg = 'I believe I have all details. Please say "done" or add final comments.';
-      logToTranscriptFile(`\n-- AGENT --\n${doneMsg}\n`);
-      sendAssistantMessage(openAiWs, doneMsg);
+      sendAssistantMessage(openAiWs, 'I believe I have all the details. Please say "done" to finalize your claim or add any final comments.');
     }
   }
 }
 
-/**
- * Sends a message from the assistant to the user (for TTS).
- */
-function sendAssistantMessage(openAiWs, text) {
-  const conversationItem = {
-    type: 'conversation.item.create',
-    item: {
-      type: 'message',
-      role: 'assistant',
-      content: [
-        { type: 'input_text', text }
-      ]
-    }
-  };
-  openAiWs.send(JSON.stringify(conversationItem));
-  // Trigger TTS
-  openAiWs.send(JSON.stringify({ type: 'response.create' }));
-}
 
-/**
- * Logs lines to out.txt in the form:
- *   -- AGENT --
- *   Some text
- * or
- *   -- CUSTOMER --
- *   Some text
- */
-function logToTranscriptFile(text) {
-  fs.appendFileSync('out.txt', text, 'utf8');
-}
+/*******************************************************
+ * Define Routes
+ *******************************************************/
 
-/**
- * Sends a greeting after we have a valid streamSid and openAiWs session.
- */
-function sendGreeting(openAiWs) {
-  const greeting = `Hello there! I am your AI voice assistant for auto insurance claims. Let’s get started!`;
-  logToTranscriptFile(`\n-- AGENT --\n${greeting}\n`);
-  sendAssistantMessage(openAiWs, greeting);
-}
-
-//
-// =============== SERVER SETUP ===============
-//
+// Root route just returns a simple status check
 fastify.get('/', async (request, reply) => {
-  reply.send({ message: 'Twilio Media Stream Server is running!' });
+  reply.send({ message: 'Server is running!' });
 });
 
-// Twilio inbound calls: TWiML response.
+// The /incoming-call route: TwiML that tells Twilio to connect a WebSocket
 fastify.all('/incoming-call', async (request, reply) => {
   const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
     <Response>
-      <Say>Please wait while we connect your call</Say>
-      <Pause length="1"/>
-      <Say>O.K. you can start talking!</Say>
       <Connect>
         <Stream url="wss://${request.headers.host}/media-stream" />
       </Connect>
@@ -258,33 +250,39 @@ fastify.all('/incoming-call', async (request, reply) => {
   reply.type('text/xml').send(twimlResponse);
 });
 
-// WebSocket route for media-stream.
+
+/*******************************************************
+ * The /media-stream route (WebSocket)
+ * Twilio will connect here and stream audio in G711 ulaw
+ *******************************************************/
 fastify.register(async (fastify) => {
   fastify.get('/media-stream', { websocket: true }, (connection, req) => {
-    console.log('Client connected');
+    console.log('Twilio client connected to /media-stream');
 
-    let streamSid = null;
-    let latestMediaTimestamp = 0;
-    let lastAssistantItem = null;
+    let streamSid = null;               // unique identifier per call
+    let latestMediaTimestamp = 0;       // to track time for audio delta
+    let lastAssistantItem = null;       // track item_id for truncation
     let markQueue = [];
     let responseStartTimestampTwilio = null;
 
-    // We accumulate raw G.711 data while the user is speaking.
-    let userAudioChunks = [];
-
-    // Create a WebSocket to connect to OpenAI Realtime (TTS)
-    // Note: Using the cheaper model endpoint here.
-    const openAiWs = new WebSocket('wss://api.openai.com/v1/realtime?model=gpt-4o-mini-realtime-preview-2024-12-17', {
-      headers: {
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-        "OpenAI-Beta": "realtime=v1"
+    // Create a dedicated OpenAI Realtime WebSocket FOR THIS CALL
+    const openAiWs = new WebSocket(
+      'wss://api.openai.com/v1/realtime?model=gpt-4o-mini-realtime-preview-2024-12-17',
+      {
+        headers: {
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
+          'OpenAI-Beta': 'realtime=v1'
+        }
       }
-    });
+    );
 
-    /**
-     * Initialize the GPT Realtime session (for TTS).
-     */
-    const initializeSession = () => {
+    /*******************************************************
+     * OpenAI WebSocket event handlers
+     *******************************************************/
+    openAiWs.on('open', () => {
+      console.log('Connected to OpenAI Realtime API (per-call).');
+
+      // Send session configuration
       const sessionUpdate = {
         type: 'session.update',
         session: {
@@ -297,152 +295,179 @@ fastify.register(async (fastify) => {
           temperature: 0.8,
         }
       };
-      console.log('Sending session update:', JSON.stringify(sessionUpdate));
       openAiWs.send(JSON.stringify(sessionUpdate));
-    };
 
-    //
-    // ============= OPENAI WS (Realtime TTS) HANDLERS =============
-    //
-    openAiWs.on('open', () => {
-      console.log('Connected to the OpenAI Realtime API');
-      setTimeout(() => {
-        initializeSession();
-      }, 100);
+      // Immediately greet user as the assistant
+      const greeting = 'Hello there! I am your AI assistant for auto insurance claims. Let’s get started!';
+      sendAssistantMessage(openAiWs, greeting);
     });
 
     openAiWs.on('message', (data) => {
+      let response;
       try {
-        const response = JSON.parse(data);
+        response = JSON.parse(data);
+      } catch (err) {
+        console.error('Error parsing OpenAI message:', err);
+        return;
+      }
 
-        if (LOG_EVENT_TYPES.includes(response.type)) {
-          console.log(`Received event: ${response.type}`, response);
+      // For debugging, log certain event types
+      if (LOG_EVENT_TYPES.includes(response.type)) {
+        console.log(`OpenAI event: ${response.type}`, response);
+        if (response.type == "error") {
+          console.log(response)
         }
+      }
 
-        // Forward TTS audio deltas to Twilio.
-        if (response.type === 'response.audio.delta' && response.delta) {
-          const audioDelta = {
-            event: 'media',
-            streamSid,
-            media: { payload: response.delta }
-          };
-          connection.send(JSON.stringify(audioDelta));
+      switch (response.type) {
+        // The assistant is returning audio deltas
+        case 'response.audio.delta':
+          if (response.delta) {
+            // Send the audio chunk to Twilio
+            const audioDelta = {
+              event: 'media',
+              streamSid,
+              media: { payload: response.delta }
+            };
+            connection.send(JSON.stringify(audioDelta));
 
-          if (!responseStartTimestampTwilio) {
-            responseStartTimestampTwilio = latestMediaTimestamp;
+            // Record timing for possible truncation if user interrupts
+            if (!responseStartTimestampTwilio) {
+              responseStartTimestampTwilio = latestMediaTimestamp;
+              if (SHOW_TIMING_MATH) {
+                console.log(`Starting response at Twilio timestamp: ${responseStartTimestampTwilio}`);
+              }
+            }
+            // Keep track of last item so we can truncate if user interrupts
+            if (response.item_id) {
+              lastAssistantItem = response.item_id;
+            }
+
+            // Add a "mark" to Twilio’s stream
+            sendMark(connection, streamSid);
           }
-          if (response.item_id) {
-            lastAssistantItem = response.item_id;
-          }
-          sendMark(connection, streamSid);
-        }
+          break;
 
-        // If user speech starts while agent is talking, handle potential barge-in logic.
-        if (response.type === 'input_audio_buffer.speech_started') {
+        // When OpenAI creates a "user" message, it’s basically a text transcription
+        case 'conversation.item.create':
+          if (response.item?.role === 'user') {
+            const userText = response.item?.content?.[0]?.text;
+            if (!userText) return;
+            console.log(`User said: ${userText}`);
+
+            // Step the conversation based on user text
+            handleUserResponse(connection, openAiWs, streamSid, userText);
+          }
+          break;
+
+        // Example: if the user started speaking, we might get 'input_audio_buffer.speech_started'
+        case 'input_audio_buffer.speech_started':
           handleSpeechStartedEvent();
-        }
-      } catch (error) {
-        console.error('Error processing OpenAI Realtime message:', error, 'Raw message:', data);
+          break;
+
+        default:
+          // Additional events come here
+          break;
       }
     });
 
     openAiWs.on('close', () => {
-      console.log('Disconnected from the OpenAI Realtime API');
+      console.log('OpenAI Realtime WebSocket closed (per-call).');
     });
 
     openAiWs.on('error', (error) => {
-      console.error('Error in the OpenAI Realtime WebSocket:', error);
+      console.error('OpenAI Realtime WebSocket error:', error);
     });
 
-    //
-    // ============= TWILIO WS HANDLERS =============
-    //
-    connection.on('message', async (message) => {
+
+    /*******************************************************
+     * Twilio Media Stream event handlers
+     *******************************************************/
+    connection.on('message', (message) => {
+      let data;
       try {
-        const data = JSON.parse(message);
+        data = JSON.parse(message);
+      } catch (err) {
+        console.error('Error parsing Twilio message:', err);
+        return;
+      }
 
-        switch (data.event) {
-          case 'start':
-            streamSid = data.start.streamSid;
-            console.log('Incoming stream has started', streamSid);
+      switch (data.event) {
+        case 'start':
+          streamSid = data.start.streamSid;
+          console.log('Twilio stream started for SID:', streamSid);
 
-            // Initialize conversation state for this call.
-            conversationStates[streamSid] = {
-              decisionTreeStep: 0,
-              subFlow: null,
-              subFlowStep: 0,
-              conversationData: {}
+          // Initialize conversation state for this call
+          conversationStates[streamSid] = {
+            decisionTreeStep: 0,
+            subFlow: null,
+            subFlowStep: 0,
+            conversationData: {}
+          };
+          break;
+
+        case 'media':
+          // Keep track of timestamp for possible truncation math
+          latestMediaTimestamp = data.media.timestamp;
+          if (SHOW_TIMING_MATH) {
+            console.log(`Received Twilio media at timestamp: ${latestMediaTimestamp}`);
+          }
+
+          // Forward raw audio payload to OpenAI
+          if (openAiWs.readyState === WebSocket.OPEN) {
+            const audioAppend = {
+              type: 'input_audio_buffer.append',
+              audio: data.media.payload
             };
+            openAiWs.send(JSON.stringify(audioAppend));
+          }
+          break;
 
-            responseStartTimestampTwilio = null;
-            latestMediaTimestamp = 0;
+        case 'mark':
+          // Twilio acknowledging our mark event
+          if (markQueue.length > 0) {
+            markQueue.shift();
+          }
+          break;
 
-            // Once we have a valid streamSid, greet the user (TTS).
-            if (openAiWs.readyState === WebSocket.OPEN) {
-              sendGreeting(openAiWs);
-            }
-            break;
+        // 'stop' event usually indicates the call ended
+        case 'stop':
+          console.log(`Twilio stream stopped for SID: ${streamSid}`);
+          break;
 
-          case 'media':
-            latestMediaTimestamp = data.media.timestamp;
-            // Accumulate raw G.711 data if the user is speaking.
-            if (userIsSpeaking) {
-              const chunk = Buffer.from(data.media.payload, 'base64');
-              userAudioChunks.push(chunk);
-            }
-
-            // Also feed the audio to GPT Realtime (for TTS).
-            if (openAiWs.readyState === WebSocket.OPEN) {
-              const audioAppend = {
-                type: 'input_audio_buffer.append',
-                audio: data.media.payload
-              };
-              openAiWs.send(JSON.stringify(audioAppend));
-            }
-            break;
-
-          case 'mark':
-            if (markQueue.length > 0) {
-              markQueue.shift();
-            }
-            break;
-
-          case 'stop':
-            // Occurs at call hangup.
-            break;
-
-          default:
-            console.log('Received non-media event:', data.event);
-            break;
-        }
-      } catch (error) {
-        console.error('Error parsing message:', error, 'Message:', message);
+        default:
+          console.log('Received other Twilio event:', data.event);
+          break;
       }
     });
 
     connection.on('close', () => {
+      // Cleanup when Twilio connection closes
       if (openAiWs.readyState === WebSocket.OPEN) {
         openAiWs.close();
       }
       if (streamSid && conversationStates[streamSid]) {
         delete conversationStates[streamSid];
       }
-      console.log('Client disconnected.');
+      console.log('Twilio client disconnected.');
     });
 
-    //
-    // ============= HELPER LOGIC (SPEECH START/STOP, WHISPER, ETC.) =============
-    //
 
-    // We'll track whether the user is speaking.
-    let userIsSpeaking = false;
+    /*******************************************************
+     * Helper Functions
+     *******************************************************/
 
     /**
-     * Called when speech starts.
+     * handleSpeechStartedEvent:
+     * If the user starts talking, we can “truncate” the assistant’s audio so it doesn’t talk over them.
      */
     function handleSpeechStartedEvent() {
-      if (markQueue.length > 0 && responseStartTimestampTwilio != null) {
+      if (markQueue.length > 0 && responseStartTimestampTwilio !== null) {
         const elapsedTime = latestMediaTimestamp - responseStartTimestampTwilio;
+        if (SHOW_TIMING_MATH) {
+          console.log(`Speech started, truncation time: ${elapsedTime}ms of assistant audio.`);
+        }
+        // If the assistant was in the middle of speaking, truncate it
         if (lastAssistantItem) {
           const truncateEvent = {
             type: 'conversation.item.truncate',
@@ -452,103 +477,19 @@ fastify.register(async (fastify) => {
           };
           openAiWs.send(JSON.stringify(truncateEvent));
         }
+        // Clear Twilio’s audio buffer so the user can speak
         connection.send(JSON.stringify({ event: 'clear', streamSid }));
+
+        // Reset
         markQueue = [];
         lastAssistantItem = null;
         responseStartTimestampTwilio = null;
       }
-      // Begin capturing user audio.
-      userIsSpeaking = true;
-      userAudioChunks = [];
     }
 
     /**
-     * Called when the user finishes speaking.
-     * 1) Write raw µ-law data to a temp file.
-     * 2) Convert the raw file to WAV using ffmpeg.
-     * 3) Send the WAV file to Whisper.
-     * 4) Log transcript as -- CUSTOMER --.
-     * 5) Pass transcript text to decision-tree logic.
+     * sendMark: We add a "mark" event so Twilio can chunk audio properly
      */
-    async function handleSpeechStoppedEvent() {
-      userIsSpeaking = false;
-      if (userAudioChunks.length === 0) return;
-
-      // Write raw G.711 data to a temporary file.
-      const rawFile = `temp_ulaw_${Date.now()}.raw`;
-      fs.writeFileSync(rawFile, Buffer.concat(userAudioChunks));
-
-      // Convert .raw to .wav using ffmpeg.
-      const wavFile = `temp_wav_${Date.now()}.wav`;
-      await convertUlawToWav(rawFile, wavFile);
-
-      // Send the WAV file to OpenAI Whisper.
-      let transcriptText = '';
-      try {
-        const resp = await openai.createTranscription(
-          fs.createReadStream(wavFile),
-          'whisper-1'
-        );
-        transcriptText = resp.data.text.trim();
-      } catch (err) {
-        console.error('Error calling Whisper API:', err);
-      }
-
-      // Clean up temporary files.
-      fs.unlinkSync(rawFile);
-      fs.unlinkSync(wavFile);
-
-      if (!transcriptText) return;
-
-      // Log the user's text.
-      logToTranscriptFile(`\n-- CUSTOMER --\n${transcriptText}\n`);
-
-      // Pass the transcript to the decision-tree logic.
-      handleUserResponse(connection, openAiWs, streamSid, transcriptText);
-    }
-
-    // Use a simple inactivity timer to detect speech stop.
-    let silenceTimer = null;
-    const SILENCE_TIMEOUT_MS = 3000;
-    setInterval(async () => {
-      const now = Date.now();
-      if (userIsSpeaking && (now - latestMediaTimestamp > SILENCE_TIMEOUT_MS)) {
-        await handleSpeechStoppedEvent();
-      }
-    }, 1000);
-
-    /**
-     * Converts raw 8kHz µ-law data to a linear PCM WAV file using ffmpeg.
-     */
-    async function convertUlawToWav(rawPath, wavPath) {
-      return new Promise((resolve, reject) => {
-        // Example ffmpeg command:
-        // ffmpeg -f mulaw -ar 8000 -i input.raw -ar 16000 -ac 1 output.wav
-        const args = [
-          '-f', 'mulaw',
-          '-ar', '8000',
-          '-i', rawPath,
-          '-ar', '16000',
-          '-ac', '1',
-          wavPath
-        ];
-        const ff = spawn(ffmpegPath, args);
-
-        ff.on('error', (err) => {
-          console.error('Failed to start ffmpeg:', err);
-          reject(err);
-        });
-
-        ff.on('close', (code) => {
-          if (code === 0) {
-            resolve(true);
-          } else {
-            reject(new Error(`ffmpeg exited with code ${code}`));
-          }
-        });
-      });
-    }
-
     function sendMark(connection, streamSid) {
       if (streamSid) {
         const markEvent = {
@@ -560,20 +501,13 @@ fastify.register(async (fastify) => {
         markQueue.push('responsePart');
       }
     }
-
-    // Optionally listen for GPT Realtime's 'input_audio_buffer.speech_stopped'
-    openAiWs.on('message', async (data) => {
-      try {
-        const response = JSON.parse(data);
-        if (response.type === 'input_audio_buffer.speech_stopped') {
-          await handleSpeechStoppedEvent();
-        }
-      } catch {}
-    });
-
   });
 });
 
+
+/*******************************************************
+ * Start the Fastify server
+ *******************************************************/
 fastify.listen({ port: PORT }, (err) => {
   if (err) {
     console.error(err);
