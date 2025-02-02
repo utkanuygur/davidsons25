@@ -10,8 +10,11 @@ import WebSocket from 'ws';
 import dotenv from 'dotenv';
 import fastifyFormBody from '@fastify/formbody';
 import fastifyWs from '@fastify/websocket';
+import fs from 'fs'
 
 // Load environment variables, including OPENAI_API_KEY
+fs.truncateSync('transcript.txt', 0);
+
 dotenv.config();
 const { OPENAI_API_KEY } = process.env;
 if (!OPENAI_API_KEY) {
@@ -31,10 +34,11 @@ const VOICE = 'alloy';
  * These guide the conversation approach and style.
  */
 const SYSTEM_MESSAGE = `
-You are a helpful and friendly AI assistant specialized in gathering information for auto insurance claims. 
+AI agent for the company Insurly, an automobile insurance pre-screening voice agent, specialized in gathering information. 
 You follow a decision tree approach to collect essential claim information. 
 For recognized user input, you should store or parse the user’s answers in a stateful conversation. 
 Always confirm the user’s statements politely and then ask the next required question.
+Repeat the question if you think you didn't get the answer to.
 `;
 
 // Store each call’s conversation state by streamSid.
@@ -42,13 +46,11 @@ const conversationStates = {};
 
 // For debugging or logging what kind of events to display
 const LOG_EVENT_TYPES = [
-  'error',
-  'response.content.done',
-  'response.done',
-  'input_audio_buffer.committed',
-  'input_audio_buffer.speech_stopped',
-  'input_audio_buffer.speech_started',
-  'session.created'
+  // 'error',
+  // 'response.content.done',
+  // 'response.done',
+  // 'input_audio_buffer.committed',
+  // 'session.created'
 ];
 
 // Toggle for debugging time-based truncation logic
@@ -96,23 +98,24 @@ const vandalismFlow = [
  * Helper: Send an Assistant Message to OpenAI Realtime
  *******************************************************/
 function sendAssistantMessage(openAiWs, text) {
-  const conversationItem = {
-    type: 'conversation.item.create',
-    item: {
-      type: 'message',
-      role: 'assistant',
-      content: [
-        {
-          type: 'input_text',
-          text
-        }
-      ]
-    }
-  };
-  openAiWs.send(JSON.stringify(conversationItem));
+  // const conversationItem = {
+  //   type: 'conversation.item.create',
+  //   item: {
+  //     type: 'message',
+  //     role: 'assistant',
+  //     content: [
+  //       {
+  //         type: 'input_text',
+  //         text
+  //       }
+  //     ]
+  //   }
+  // };
+  // openAiWs.send(JSON.stringify(conversationItem));
 
-  // This tells OpenAI to generate an audio response for the newly queued assistant message.
-  openAiWs.send(JSON.stringify({ type: 'response.create' }));
+  // // This tells OpenAI to generate an audio response for the newly queued assistant message.
+  // openAiWs.send(JSON.stringify({ type: 'response.create' }));
+  return;
 }
 
 
@@ -289,6 +292,10 @@ fastify.register(async (fastify) => {
           turn_detection: { type: 'server_vad' },
           input_audio_format: 'g711_ulaw',
           output_audio_format: 'g711_ulaw',
+          input_audio_transcription: {
+          model: "whisper-1",
+          language: "en"
+          },
           voice: VOICE,
           instructions: SYSTEM_MESSAGE,
           modalities: ['text', 'audio'],
@@ -352,11 +359,13 @@ fastify.register(async (fastify) => {
         case 'conversation.item.create':
           if (response.item?.role === 'user') {
             const userText = response.item?.content?.[0]?.text;
-            if (!userText) return;
+            if (userText) {
+
             console.log(`User said: ${userText}`);
 
             // Step the conversation based on user text
             handleUserResponse(connection, openAiWs, streamSid, userText);
+            };
           }
           break;
 
@@ -365,7 +374,16 @@ fastify.register(async (fastify) => {
           handleSpeechStartedEvent();
           break;
 
-        default:
+          case 'conversation.item.input_audio_transcription.completed':
+            fs.writeFileSync('file.txt', '', 'utf8');
+            console.log("-- USER --");
+            console.log(response.transcript);
+            console.log();
+
+        case 'response.audio_transcript.done':
+          console.log("-- ASSISTANT --");
+          console.log(response.transcript);
+          console.log();
           // Additional events come here
           break;
       }
@@ -379,7 +397,10 @@ fastify.register(async (fastify) => {
       console.error('OpenAI Realtime WebSocket error:', error);
     });
 
-
+    function writer(text) {
+      fs.writeFile('transcript.txt', text);
+      console.log("hello world");
+    }
     /*******************************************************
      * Twilio Media Stream event handlers
      *******************************************************/

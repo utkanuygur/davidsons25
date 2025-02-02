@@ -1,2 +1,0 @@
-[2025-02-01T23:04:06.584Z] Assistant: Hello there! I am your AI voice assistant for auto insurance claims. 
-I’ll collect some details about your claim. Let’s get started!
